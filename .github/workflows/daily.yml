@@ -1,0 +1,86 @@
+name: Daily EMIT products
+
+# Downloads the latest EMIT L1B radiance scene, runs ACOLITE atmospheric
+# correction + MoE-VAE inference, and publishes the resulting Cloud Optimized
+# GeoTIFFs to the "EMIT-Data" GitHub release and a Hugging Face dataset.
+#
+# This workflow targets a SELF-HOSTED runner because the pipeline depends on a
+# local ACOLITE install (set ACOLITE_DIR) and processes multi-GB EMIT L1B
+# granules onto the local data drive (/media/hdd/Data/EMIT). To run it on a
+# GitHub-hosted runner instead, you would need to install ACOLITE in a setup
+# step and switch `runs-on` to `ubuntu-latest`.
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # 06:00 UTC daily
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # needed to create/update releases
+
+concurrency:
+  group: daily-emit
+  cancel-in-progress: false
+
+jobs:
+  process:
+    runs-on: [self-hosted, emit]
+    timeout-minutes: 240
+    env:
+      # Path to the local ACOLITE install (contains the `acolite` executable).
+      ACOLITE_DIR: ${{ vars.ACOLITE_DIR }}
+      # Where EMIT scenes, intermediate L2, and products live on the runner.
+      EMIT_DATA_DIR: /media/hdd/Data/EMIT/data
+      EMIT_OUTPUT_DIR: /media/hdd/Data/EMIT/output
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download the latest scene
+        env:
+          EARTHDATA_USERNAME: ${{ secrets.EARTHDATA_USERNAME }}
+          EARTHDATA_PASSWORD: ${{ secrets.EARTHDATA_PASSWORD }}
+        run: python download_latest.py
+
+      - name: Process the latest scene
+        run: python run_folder.py
+
+      - name: List products
+        run: ls -lh "$EMIT_OUTPUT_DIR"
+
+      - name: Publish GeoTIFFs to the EMIT-Data release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view EMIT-Data >/dev/null 2>&1 || \
+            gh release create EMIT-Data \
+              --title "EMIT-Data" \
+              --notes "Cloud Optimized GeoTIFFs (chl-a, TSS, aCDOM) generated automatically from EMIT L1B radiance scenes (ACOLITE + MoE-VAE). Updated daily; products from each acquisition date accumulate here."
+          gh release upload EMIT-Data "$EMIT_OUTPUT_DIR"/*.tif --clobber
+
+      - name: Publish GeoTIFFs to the Hugging Face dataset
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+
+          repo_id = "giswqs/EMIT-Water-Quality"
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          api.create_repo(repo_id, repo_type="dataset", exist_ok=True)
+          api.upload_folder(
+              folder_path=os.environ["EMIT_OUTPUT_DIR"],
+              path_in_repo="cogs",
+              repo_id=repo_id,
+              repo_type="dataset",
+              allow_patterns=["*.tif"],
+              commit_message="Add daily EMIT water-quality products",
+          )
+          print("Uploaded GeoTIFFs to", f"https://huggingface.co/datasets/{repo_id}")
+          PY

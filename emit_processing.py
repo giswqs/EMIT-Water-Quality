@@ -14,10 +14,19 @@ before inference:
 * :func:`save_products_to_nc` - write a merged multi-variable NetCDF.
 * :func:`process_scene` - end-to-end ACOLITE + inference + outputs.
 
+Every scene keeps its own products: a COG is named after the input L1B granule
+and placed in a per-product subfolder, so several passes on the same date all
+survive::
+
+    output/chla/EMIT_L1B_RAD_001_20250414T200042_2510413_035.tif
+    output/tss/EMIT_L1B_RAD_001_20250414T200042_2510413_035.tif
+    output/acdom/EMIT_L1B_RAD_001_20250414T200042_2510413_035.tif
+
 Entry points:
 
 * ``run_file.py`` processes a single L1B radiance scene.
 * ``run_folder.py`` processes every L1B radiance scene in a folder.
+* ``make_json.py`` builds the per-date GeoJSON catalogs from the COGs.
 """
 
 import os
@@ -37,7 +46,7 @@ from rio_cogeo.profiles import cog_profiles
 
 # Resolve paths relative to this module so it can run from any location.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(BASE_DIR, "code"))
+sys.path.append(os.path.join(BASE_DIR, "moe_vae"))
 
 from MoE_VAE import *  # noqa: E402,F401,F403
 from data_loading import *  # noqa: E402,F401,F403
@@ -130,16 +139,38 @@ PRODUCT_BANDS = {
     "acdom440": BANDS_403_701,
 }
 
-# Map dataset variable -> output filename label (aCDOM drops the "440").
+# Map dataset variable -> output subfolder label (aCDOM drops the "440").
 PRODUCT_LABELS = {"chla": "chla", "tss": "tss", "acdom440": "acdom"}
+
+# Base URL the published COGs are served from. The per-date JSON catalogs
+# reference the COGs here, mirroring the local ``<product>/<granule>.tif``
+# layout of the output folder.
+HF_DATA_URL = (
+    "https://huggingface.co/datasets/giswqs/EMIT-Water-Quality/resolve/main/data"
+)
 
 # ===========================================================================
 # ACOLITE configuration. Atmospheric correction is run through HyperCoast's
 # ``run_acolite`` (which locates the bundled ``dist/acolite/acolite``
-# executable) and HyperCoast's ``download_acolite`` (which fetches a complete
-# official release). Point ACOLITE_DIR at an existing install to skip the
-# download; otherwise it is downloaded on first use.
+# executable). Point ACOLITE_DIR at an existing install to skip the download;
+# otherwise the pinned release is downloaded on first use.
+#
+# The ACOLITE release is pinned because it changes the *products*, not just
+# the tooling: the water/cirrus/TOA masks differ between versions, so the
+# number of retrieved pixels does too. On the reference scene, release
+# 20231023.0 yields 187,337 valid pixels where 20251013.0 yields 376,673 -
+# a factor of two. 20251013.0 is the release the reference products were
+# generated with (verified by matching the executable's md5).
+#
+# Note that ``hypercoast.download_acolite`` is hardcoded to 20231023.0, which
+# is why it is not used here.
 # ===========================================================================
+ACOLITE_VERSION = "20251013.0"
+ACOLITE_URL = (
+    f"https://github.com/acolite/acolite/releases/download/{ACOLITE_VERSION}/"
+    f"acolite_py_linux_{ACOLITE_VERSION}.tar.gz"
+)
+
 # `or` (not a get default) so an empty ACOLITE_DIR env var still falls back.
 ACOLITE_DIR = os.environ.get("ACOLITE_DIR") or os.path.join(
     BASE_DIR, "acolite_py_linux"
@@ -190,8 +221,8 @@ def ensure_acolite(acolite_dir=None, download=True):
     Args:
         acolite_dir (str, optional): Candidate ACOLITE install directory.
             Defaults to ``ACOLITE_DIR``.
-        download (bool): If the install is missing, fetch a complete official
-            release with ``hypercoast.download_acolite`` (default True).
+        download (bool): If the install is missing, fetch the pinned official
+            release (``ACOLITE_VERSION``) from GitHub (default True).
 
     Returns:
         str: A directory whose ``dist/acolite/acolite`` executable exists.
@@ -207,10 +238,33 @@ def ensure_acolite(acolite_dir=None, download=True):
             f"ACOLITE executable not found under {acolite_dir}. Set ACOLITE_DIR "
             "to an existing install, or allow download=True."
         )
-    # download_acolite extracts to <outdir>/acolite_py_<os> and returns it.
+
+    import tarfile
+    import urllib.request
+
+    # The archive extracts to <outdir>/acolite_py_linux. Fetch the pinned
+    # release directly rather than via hypercoast.download_acolite, which is
+    # hardcoded to 20231023.0 and would halve the retrieved pixel count.
     outdir = os.path.dirname(os.path.abspath(acolite_dir)) or "."
-    print("ACOLITE not found; downloading a release ...")
-    return hypercoast.download_acolite(outdir=outdir)
+    os.makedirs(outdir, exist_ok=True)
+    tarball = os.path.join(outdir, f"acolite_py_linux_{ACOLITE_VERSION}.tar.gz")
+    if not os.path.exists(tarball):
+        print(f"ACOLITE not found; downloading {ACOLITE_VERSION} ...")
+        # Download to a temporary name first so an interrupted transfer does
+        # not leave a truncated archive that later runs would trust.
+        urllib.request.urlretrieve(ACOLITE_URL, tarball + ".part")
+        os.replace(tarball + ".part", tarball)
+    print(f"Extracting {tarball} ...")
+    with tarfile.open(tarball) as tar:
+        tar.extractall(outdir)
+
+    extracted = os.path.join(outdir, "acolite_py_linux")
+    if not os.path.exists(_acolite_binary(extracted)):
+        raise FileNotFoundError(
+            f"ACOLITE executable still missing under {extracted} after "
+            f"extracting {tarball}."
+        )
+    return extracted
 
 
 # Conda/GDAL environment variables that would otherwise leak into the ACOLITE
@@ -249,7 +303,7 @@ class _clean_acolite_env:
         return False
 
 
-def run_acolite(input_nc, out_root, acolite_dir=None, download=True):
+def run_acolite(input_nc, out_root, acolite_dir=None, download=True, reuse=True):
     """Atmospherically correct one EMIT L1B radiance scene with ACOLITE.
 
     ACOLITE reads the L1B ``RAD`` granule (and the matching ``OBS``
@@ -266,6 +320,12 @@ def run_acolite(input_nc, out_root, acolite_dir=None, download=True):
             ``ACOLITE_DIR``; downloaded automatically if missing.
         download (bool): Download ACOLITE if it is not already installed
             (default True).
+        reuse (bool): If an L2W product already exists for this scene, return
+            it instead of re-running ACOLITE (default True). Atmospheric
+            correction is by far the slowest step and its output depends only
+            on the input granule and settings, so re-running inference (for
+            example at a different output resolution) does not need to repeat
+            it. Pass False to force a fresh correction.
 
     Returns:
         dict: ``{"scene", "input_nc", "output_dir", "l2r_files", "l2w_files"}``.
@@ -273,10 +333,22 @@ def run_acolite(input_nc, out_root, acolite_dir=None, download=True):
     Raises:
         FileNotFoundError: If ACOLITE produces no L2W file.
     """
-    acolite_dir = ensure_acolite(acolite_dir, download=download)
-
     scene = Path(input_nc).stem
     out_path = os.path.join(out_root, scene)
+
+    if reuse:
+        existing = sorted(glob.glob(os.path.join(out_path, "*L2W*.nc")))
+        if existing:
+            print(f"Reusing existing ACOLITE L2W for {scene}: {existing[0]}")
+            return {
+                "scene": scene,
+                "input_nc": str(input_nc),
+                "output_dir": out_path,
+                "l2r_files": sorted(glob.glob(os.path.join(out_path, "*L2R*.nc"))),
+                "l2w_files": existing,
+            }
+
+    acolite_dir = ensure_acolite(acolite_dir, download=download)
     os.makedirs(out_path, exist_ok=True)
 
     settings_file = os.path.join(out_path, f"{scene}_acolite_settings.txt")
@@ -403,8 +475,9 @@ def load_models(model_dir, device):
         os.path.join(acdom_dir, "scaler.pt"), map_location="cpu", weights_only=False
     )
 
-    # eval() mode: disables noisy gating and makes the VAE use the latent
-    # mean (deterministic inference).
+    # eval() mode disables the MoE noisy gating. The VAE experts additionally
+    # return their latent mean instead of sampling when not training (see
+    # VAE.reparameterize), which is what makes inference reproducible.
     for mdl in (chla_model, tss_model, acdom_model):
         mdl.eval()
 
@@ -428,7 +501,7 @@ def save_product_to_cog(
     lat_2d,
     lon_2d,
     values_2d,
-    resolution_m=1000,
+    resolution_m=60,
     method="linear",
     nodata=-9999.0,
 ):
@@ -449,8 +522,11 @@ def save_product_to_cog(
         lon_2d (np.ndarray): Longitude (degrees east, EPSG:4326).
         values_2d (np.ndarray): Product values aligned with lat/lon (NaN for
             invalid pixels).
-        resolution_m (float): Target grid resolution in metres (default 1000,
-            ~0.01 deg).
+        resolution_m (float): Target grid resolution in metres. Defaults to 60,
+            EMIT's native ground sampling distance, so gridding re-projects the
+            swath without throwing away spatial detail. (PACE uses 1000 m
+            because that is *its* native resolution; reusing that here would
+            collapse ~280 EMIT pixels into every output cell.)
         method (str): ``griddata`` interpolation method (default "linear").
         nodata (float): Value used for empty cells.
 
@@ -610,23 +686,64 @@ def infer_scene_maps(nc_path, models):
     }
 
 
-def write_scene_cogs(maps, save_dir, date):
-    """Write the in-memory product maps to date-named gridded COGs.
+def scene_stem(input_nc):
+    """Return the L1B granule name without its extension.
+
+    The stem is reused verbatim as the COG filename, so an output can always
+    be traced back to the exact granule it came from. The EMIT L1B name is
+    used (not the ACOLITE L2W name) because it carries the granule ID and the
+    ``YYYYMMDDTHHMMSS`` stamp the catalogs group on.
+
+    Args:
+        input_nc (str): Path to the EMIT L1B NetCDF file, e.g.
+            ``EMIT_L1B_RAD_001_20250414T200042_2510413_035.nc``.
+
+    Returns:
+        str: The filename without directory or extension, e.g.
+            ``"EMIT_L1B_RAD_001_20250414T200042_2510413_035"``.
+    """
+    return os.path.splitext(os.path.basename(input_nc))[0]
+
+
+def scene_cog_paths(save_dir, stem):
+    """Build the COG output path for every product of one scene.
+
+    Args:
+        save_dir (str): Root output directory.
+        stem (str): Granule stem from :func:`scene_stem`.
+
+    Returns:
+        dict: Mapping of product label (``chla``/``tss``/``acdom``) to the
+            path ``<save_dir>/<label>/<stem>.tif``.
+    """
+    return {
+        label: os.path.join(save_dir, label, f"{stem}.tif")
+        for label in PRODUCT_LABELS.values()
+    }
+
+
+def write_scene_cogs(maps, save_dir, stem):
+    """Write the in-memory product maps to granule-named gridded COGs.
+
+    Each product goes to ``<save_dir>/<label>/<stem>.tif``, so every pass of a
+    given date produces its own set of files instead of overwriting the others.
 
     Args:
         maps (dict): Output of :func:`infer_scene_maps`.
-        save_dir (str): Output directory.
-        date (str): Acquisition date (YYYYMMDD) used in the filename.
+        save_dir (str): Root output directory.
+        stem (str): Granule stem from :func:`scene_stem`.
 
     Returns:
         list[str]: Paths to the written COGs.
     """
-    os.makedirs(save_dir, exist_ok=True)
+    out_paths = scene_cog_paths(save_dir, stem)
     paths = []
     for var, label in PRODUCT_LABELS.items():
+        out_tif = out_paths[label]
+        os.makedirs(os.path.dirname(out_tif), exist_ok=True)
         paths.append(
             save_product_to_cog(
-                out_tif=os.path.join(save_dir, f"EMIT-{date}-{label}.tif"),
+                out_tif=out_tif,
                 lat_2d=maps["latitude"],
                 lon_2d=maps["longitude"],
                 values_2d=maps[var],
@@ -708,7 +825,8 @@ def process_scene(
     l2_dir,
     acolite_dir=None,
     download=True,
-    write_nc=True,
+    write_nc=False,
+    reuse_l2w=True,
 ):
     """Run the full EMIT pipeline on one L1B radiance scene.
 
@@ -724,18 +842,29 @@ def process_scene(
             ``ACOLITE_DIR``; downloaded automatically if missing).
         download (bool): Download ACOLITE if not already installed (default
             True).
-        write_nc (bool): Also write the merged products NetCDF (default True).
+        write_nc (bool): Also write the merged products NetCDF alongside the
+            COGs (default False). The COGs are the published product; the
+            NetCDF is a local convenience for keeping the native swath
+            geometry.
+        reuse_l2w (bool): Reuse an existing ACOLITE L2W product for this scene
+            instead of re-running the correction (default True).
 
     Returns:
         list[str]: Paths to the written COG files.
     """
     print(f"Processing scene: {input_nc}")
-    result = run_acolite(input_nc, l2_dir, acolite_dir=acolite_dir, download=download)
+    result = run_acolite(
+        input_nc,
+        l2_dir,
+        acolite_dir=acolite_dir,
+        download=download,
+        reuse=reuse_l2w,
+    )
     l2w_path = result["l2w_files"][0]
 
     maps = infer_scene_maps(l2w_path, models)
-    date = parse_acquisition_date(input_nc)
-    cogs = write_scene_cogs(maps, save_dir, date)
+    stem = scene_stem(input_nc)
+    cogs = write_scene_cogs(maps, save_dir, stem)
     if write_nc:
-        save_products_to_nc(maps, os.path.join(save_dir, f"EMIT-{date}-products.nc"))
+        save_products_to_nc(maps, os.path.join(save_dir, "nc", f"{stem}.nc"))
     return cogs

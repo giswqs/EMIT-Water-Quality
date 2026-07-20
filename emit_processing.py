@@ -265,7 +265,7 @@ class _clean_acolite_env:
         return False
 
 
-def run_acolite(input_nc, out_root, acolite_dir=None, download=True):
+def run_acolite(input_nc, out_root, acolite_dir=None, download=True, reuse=True):
     """Atmospherically correct one EMIT L1B radiance scene with ACOLITE.
 
     ACOLITE reads the L1B ``RAD`` granule (and the matching ``OBS``
@@ -282,6 +282,12 @@ def run_acolite(input_nc, out_root, acolite_dir=None, download=True):
             ``ACOLITE_DIR``; downloaded automatically if missing.
         download (bool): Download ACOLITE if it is not already installed
             (default True).
+        reuse (bool): If an L2W product already exists for this scene, return
+            it instead of re-running ACOLITE (default True). Atmospheric
+            correction is by far the slowest step and its output depends only
+            on the input granule and settings, so re-running inference (for
+            example at a different output resolution) does not need to repeat
+            it. Pass False to force a fresh correction.
 
     Returns:
         dict: ``{"scene", "input_nc", "output_dir", "l2r_files", "l2w_files"}``.
@@ -289,10 +295,22 @@ def run_acolite(input_nc, out_root, acolite_dir=None, download=True):
     Raises:
         FileNotFoundError: If ACOLITE produces no L2W file.
     """
-    acolite_dir = ensure_acolite(acolite_dir, download=download)
-
     scene = Path(input_nc).stem
     out_path = os.path.join(out_root, scene)
+
+    if reuse:
+        existing = sorted(glob.glob(os.path.join(out_path, "*L2W*.nc")))
+        if existing:
+            print(f"Reusing existing ACOLITE L2W for {scene}: {existing[0]}")
+            return {
+                "scene": scene,
+                "input_nc": str(input_nc),
+                "output_dir": out_path,
+                "l2r_files": sorted(glob.glob(os.path.join(out_path, "*L2R*.nc"))),
+                "l2w_files": existing,
+            }
+
+    acolite_dir = ensure_acolite(acolite_dir, download=download)
     os.makedirs(out_path, exist_ok=True)
 
     settings_file = os.path.join(out_path, f"{scene}_acolite_settings.txt")
@@ -444,7 +462,7 @@ def save_product_to_cog(
     lat_2d,
     lon_2d,
     values_2d,
-    resolution_m=1000,
+    resolution_m=60,
     method="linear",
     nodata=-9999.0,
 ):
@@ -465,8 +483,11 @@ def save_product_to_cog(
         lon_2d (np.ndarray): Longitude (degrees east, EPSG:4326).
         values_2d (np.ndarray): Product values aligned with lat/lon (NaN for
             invalid pixels).
-        resolution_m (float): Target grid resolution in metres (default 1000,
-            ~0.01 deg).
+        resolution_m (float): Target grid resolution in metres. Defaults to 60,
+            EMIT's native ground sampling distance, so gridding re-projects the
+            swath without throwing away spatial detail. (PACE uses 1000 m
+            because that is *its* native resolution; reusing that here would
+            collapse ~280 EMIT pixels into every output cell.)
         method (str): ``griddata`` interpolation method (default "linear").
         nodata (float): Value used for empty cells.
 
@@ -766,6 +787,7 @@ def process_scene(
     acolite_dir=None,
     download=True,
     write_nc=False,
+    reuse_l2w=True,
 ):
     """Run the full EMIT pipeline on one L1B radiance scene.
 
@@ -785,12 +807,20 @@ def process_scene(
             COGs (default False). The COGs are the published product; the
             NetCDF is a local convenience for keeping the native swath
             geometry.
+        reuse_l2w (bool): Reuse an existing ACOLITE L2W product for this scene
+            instead of re-running the correction (default True).
 
     Returns:
         list[str]: Paths to the written COG files.
     """
     print(f"Processing scene: {input_nc}")
-    result = run_acolite(input_nc, l2_dir, acolite_dir=acolite_dir, download=download)
+    result = run_acolite(
+        input_nc,
+        l2_dir,
+        acolite_dir=acolite_dir,
+        download=download,
+        reuse=reuse_l2w,
+    )
     l2w_path = result["l2w_files"][0]
 
     maps = infer_scene_maps(l2w_path, models)

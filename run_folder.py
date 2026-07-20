@@ -97,6 +97,12 @@ parser.add_argument(
     help="Reprocess scenes whose COGs already exist (default: skip them).",
 )
 parser.add_argument(
+    "--reprocess-l2",
+    action="store_true",
+    help="Re-run ACOLITE even when an L2W product already exists (default: "
+    "reuse it, since atmospheric correction is the slow step).",
+)
+parser.add_argument(
     "--write-nc",
     action="store_true",
     help="Also write a merged per-scene NetCDF to <output>/nc (default: off).",
@@ -162,6 +168,7 @@ else:
                 args.l2_dir,
                 acolite_dir=args.acolite_dir,
                 download=not args.no_download,
+                reuse=not args.reprocess_l2,
             )
             maps = infer_scene_maps(result["l2w_files"][0], models)
             print(f"  {maps['valid']} valid pixels")

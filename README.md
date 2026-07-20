@@ -201,7 +201,11 @@ several features — together they mosaic into that day's coverage.
 EMIT L2W swaths are rotated/curved in lon/lat, so the array's `(row, col)`
 layout is not axis-aligned and cannot be written to a GeoTIFF directly.
 Instead each product is gridded at its true `(lon, lat)` onto a regular
-EPSG:4326 grid (~1 km, 0.01°) with `scipy.interpolate.griddata`. This
+EPSG:4326 grid with `scipy.interpolate.griddata`, at **60 m** — EMIT's native
+ground sampling distance, so re-projecting the swath does not throw away
+spatial detail. (Override with `resolution_m`. The sister PACE pipeline grids
+at 1 km because that is *its* native resolution; reusing that figure here
+would collapse roughly 280 EMIT pixels into every output cell.) This
 georeferences correctly and the interpolation fills the thin rotated-scan gaps
 for a continuous coastal field, while leaving the open ocean / large cloud gaps
 outside the data hull as nodata. Each GeoTIFF is written with internal tiling,

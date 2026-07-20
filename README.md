@@ -77,6 +77,35 @@ export ACOLITE_DIR=/path/to/acolite_py_linux
 Pass `--acolite-dir` to point at a specific install, or `--no-download` to
 fail instead of fetching ACOLITE when it is missing.
 
+#### Aerosol LUTs
+
+EMIT is hyperspectral, so ACOLITE uses the *generic* aerosol LUTs rather than a
+sensor-specific set, and decompresses them from `.nc.bz2` to `.nc` under
+`data/LUT/` on first use (~2.8 GB, a few minutes).
+
+If a run is interrupted during that step it leaves a **truncated `.nc`**, and
+every later run then fails with a confusing error from `import_luts`:
+
+```
+ValueError: not enough values to unpack (expected 2, got 0)
+```
+
+The fix is to remove the partial file so it is regenerated — or to decompress
+them all up front, which also avoids the race if you ever run two scenes
+concurrently:
+
+```bash
+cd "$ACOLITE_DIR/data/LUT"
+for f in ACOLITE-LUT-202110/*.nc.bz2 RSKY-202102/*.nc.bz2; do
+  out="${f%.bz2}"
+  [ -s "$out" ] || { bunzip2 -kc "$f" > "$out.tmp" && mv "$out.tmp" "$out"; }
+done
+```
+
+Each `ACOLITE-LUT-202110-*.nc` should be 269,635,982 bytes and each
+`ACOLITE-RSKY-202102-82W-*.nc` 113,538,493 bytes; anything smaller is partial.
+Note that ACOLITE runs must not share a LUT directory concurrently.
+
 ## NASA Earthdata credentials
 
 Downloading requires a free [Earthdata](https://urs.earthdata.nasa.gov)

@@ -211,9 +211,20 @@ for a continuous coastal field, while leaving the open ocean / large cloud gaps
 outside the data hull as nodata. Each GeoTIFF is written with internal tiling,
 overviews and DEFLATE compression, then validated with `rio_cogeo`.
 
-Inference is deterministic: the models run in `eval()` mode, which disables
-the MoE noisy gating and makes the VAE use its latent mean, so re-running a
-scene reproduces the same products.
+Inference is deterministic, so re-running a scene reproduces the same products
+bit for bit. Two things are needed for that, and only the first comes from
+`eval()`:
+
+- `eval()` disables the MoE **noisy gating**, which is guarded by `self.training`.
+- `VAE.reparameterize` returns the **latent mean** at inference instead of
+  drawing `eps = torch.randn_like(std)`. The upstream code sampled on every
+  forward pass regardless of `eval()`, which made each run of the same scene
+  return different values (a spread of up to ~250 mg m⁻³ chl-a between runs,
+  though the distribution was stable to well under a percent). `MoE_VAE`
+  dispatches to these VAE experts, so the sampling reached every product.
+
+Using the latent mean is standard VAE inference; the reparameterisation trick
+exists only to backpropagate through sampling during training.
 
 ### Bands
 

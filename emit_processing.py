@@ -437,8 +437,9 @@ def load_models(model_dir, device):
         os.path.join(acdom_dir, "scaler.pt"), map_location="cpu", weights_only=False
     )
 
-    # eval() mode: disables noisy gating and makes the VAE use the latent
-    # mean (deterministic inference).
+    # eval() mode disables the MoE noisy gating. The VAE experts additionally
+    # return their latent mean instead of sampling when not training (see
+    # VAE.reparameterize), which is what makes inference reproducible.
     for mdl in (chla_model, tss_model, acdom_model):
         mdl.eval()
 

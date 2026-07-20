@@ -14,10 +14,19 @@ before inference:
 * :func:`save_products_to_nc` - write a merged multi-variable NetCDF.
 * :func:`process_scene` - end-to-end ACOLITE + inference + outputs.
 
+Every scene keeps its own products: a COG is named after the input L1B granule
+and placed in a per-product subfolder, so several passes on the same date all
+survive::
+
+    output/chla/EMIT_L1B_RAD_001_20250414T200042_2510413_035.tif
+    output/tss/EMIT_L1B_RAD_001_20250414T200042_2510413_035.tif
+    output/acdom/EMIT_L1B_RAD_001_20250414T200042_2510413_035.tif
+
 Entry points:
 
 * ``run_file.py`` processes a single L1B radiance scene.
 * ``run_folder.py`` processes every L1B radiance scene in a folder.
+* ``make_json.py`` builds the per-date GeoJSON catalogs from the COGs.
 """
 
 import os
@@ -37,7 +46,7 @@ from rio_cogeo.profiles import cog_profiles
 
 # Resolve paths relative to this module so it can run from any location.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(BASE_DIR, "code"))
+sys.path.append(os.path.join(BASE_DIR, "moe_vae"))
 
 from MoE_VAE import *  # noqa: E402,F401,F403
 from data_loading import *  # noqa: E402,F401,F403
@@ -130,8 +139,15 @@ PRODUCT_BANDS = {
     "acdom440": BANDS_403_701,
 }
 
-# Map dataset variable -> output filename label (aCDOM drops the "440").
+# Map dataset variable -> output subfolder label (aCDOM drops the "440").
 PRODUCT_LABELS = {"chla": "chla", "tss": "tss", "acdom440": "acdom"}
+
+# Base URL the published COGs are served from. The per-date JSON catalogs
+# reference the COGs here, mirroring the local ``<product>/<granule>.tif``
+# layout of the output folder.
+HF_DATA_URL = (
+    "https://huggingface.co/datasets/giswqs/EMIT-Water-Quality/resolve/main/data"
+)
 
 # ===========================================================================
 # ACOLITE configuration. Atmospheric correction is run through HyperCoast's
@@ -610,23 +626,64 @@ def infer_scene_maps(nc_path, models):
     }
 
 
-def write_scene_cogs(maps, save_dir, date):
-    """Write the in-memory product maps to date-named gridded COGs.
+def scene_stem(input_nc):
+    """Return the L1B granule name without its extension.
+
+    The stem is reused verbatim as the COG filename, so an output can always
+    be traced back to the exact granule it came from. The EMIT L1B name is
+    used (not the ACOLITE L2W name) because it carries the granule ID and the
+    ``YYYYMMDDTHHMMSS`` stamp the catalogs group on.
+
+    Args:
+        input_nc (str): Path to the EMIT L1B NetCDF file, e.g.
+            ``EMIT_L1B_RAD_001_20250414T200042_2510413_035.nc``.
+
+    Returns:
+        str: The filename without directory or extension, e.g.
+            ``"EMIT_L1B_RAD_001_20250414T200042_2510413_035"``.
+    """
+    return os.path.splitext(os.path.basename(input_nc))[0]
+
+
+def scene_cog_paths(save_dir, stem):
+    """Build the COG output path for every product of one scene.
+
+    Args:
+        save_dir (str): Root output directory.
+        stem (str): Granule stem from :func:`scene_stem`.
+
+    Returns:
+        dict: Mapping of product label (``chla``/``tss``/``acdom``) to the
+            path ``<save_dir>/<label>/<stem>.tif``.
+    """
+    return {
+        label: os.path.join(save_dir, label, f"{stem}.tif")
+        for label in PRODUCT_LABELS.values()
+    }
+
+
+def write_scene_cogs(maps, save_dir, stem):
+    """Write the in-memory product maps to granule-named gridded COGs.
+
+    Each product goes to ``<save_dir>/<label>/<stem>.tif``, so every pass of a
+    given date produces its own set of files instead of overwriting the others.
 
     Args:
         maps (dict): Output of :func:`infer_scene_maps`.
-        save_dir (str): Output directory.
-        date (str): Acquisition date (YYYYMMDD) used in the filename.
+        save_dir (str): Root output directory.
+        stem (str): Granule stem from :func:`scene_stem`.
 
     Returns:
         list[str]: Paths to the written COGs.
     """
-    os.makedirs(save_dir, exist_ok=True)
+    out_paths = scene_cog_paths(save_dir, stem)
     paths = []
     for var, label in PRODUCT_LABELS.items():
+        out_tif = out_paths[label]
+        os.makedirs(os.path.dirname(out_tif), exist_ok=True)
         paths.append(
             save_product_to_cog(
-                out_tif=os.path.join(save_dir, f"EMIT-{date}-{label}.tif"),
+                out_tif=out_tif,
                 lat_2d=maps["latitude"],
                 lon_2d=maps["longitude"],
                 values_2d=maps[var],
@@ -708,7 +765,7 @@ def process_scene(
     l2_dir,
     acolite_dir=None,
     download=True,
-    write_nc=True,
+    write_nc=False,
 ):
     """Run the full EMIT pipeline on one L1B radiance scene.
 
@@ -724,7 +781,10 @@ def process_scene(
             ``ACOLITE_DIR``; downloaded automatically if missing).
         download (bool): Download ACOLITE if not already installed (default
             True).
-        write_nc (bool): Also write the merged products NetCDF (default True).
+        write_nc (bool): Also write the merged products NetCDF alongside the
+            COGs (default False). The COGs are the published product; the
+            NetCDF is a local convenience for keeping the native swath
+            geometry.
 
     Returns:
         list[str]: Paths to the written COG files.
@@ -734,8 +794,8 @@ def process_scene(
     l2w_path = result["l2w_files"][0]
 
     maps = infer_scene_maps(l2w_path, models)
-    date = parse_acquisition_date(input_nc)
-    cogs = write_scene_cogs(maps, save_dir, date)
+    stem = scene_stem(input_nc)
+    cogs = write_scene_cogs(maps, save_dir, stem)
     if write_nc:
-        save_products_to_nc(maps, os.path.join(save_dir, f"EMIT-{date}-products.nc"))
+        save_products_to_nc(maps, os.path.join(save_dir, "nc", f"{stem}.nc"))
     return cogs

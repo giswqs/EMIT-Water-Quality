@@ -1,19 +1,28 @@
-"""Process EMIT L1B radiance scenes in a folder into daily water-quality COGs.
+"""Process EMIT L1B radiance scenes in a folder into per-scene water-quality COGs.
 
-For each acquisition date, every EMIT L1B pass in the folder is atmospherically
-corrected with ACOLITE and run through the models; the pass with the most valid
-retrieval pixels is kept and written as date-named Cloud Optimized GeoTIFFs
-(chl-a, TSS, aCDOM) plus a merged products NetCDF in the output folder.
+Every EMIT L1B pass in the folder is atmospherically corrected with ACOLITE,
+run through the models, and written as validated Cloud Optimized GeoTIFFs
+(chl-a, TSS, aCDOM). Each COG keeps the granule name of its input and lives in
+a per-product subfolder, so dates with several passes keep every pass::
+
+    output/chla/EMIT_L1B_RAD_001_20250414T200042_2510413_035.tif
+    output/tss/EMIT_L1B_RAD_001_20250414T200042_2510413_035.tif
+    output/acdom/EMIT_L1B_RAD_001_20250414T200042_2510413_035.tif
+
+Products are gridded from the swath onto a regular EPSG:4326 grid. Scenes
+whose COGs already exist are skipped unless ``--overwrite`` is passed, so an
+interrupted backfill can simply be re-run — which matters here because ACOLITE
+is the slow step.
 
 Examples::
 
     python run_folder.py                       # process the default data dir
     python run_folder.py /path/to/scenes --output /path/to/output
+    python run_folder.py --json-dir /media/hdd/Data/EMIT/json
 
 ACOLITE must be installed locally; point at it via the ``ACOLITE_DIR``
-environment variable (or ``--acolite`` / ``--proj-dir``). Only ``L1B_RAD``
-granules are processed; the matching ``L1B_OBS`` granules must sit alongside
-them.
+environment variable (or ``--acolite-dir``). Only ``L1B_RAD`` granules are
+processed; the matching ``L1B_OBS`` granules must sit alongside them.
 
 To process a single file, use ``run_file.py``.
 """
@@ -21,7 +30,6 @@ To process a single file, use ``run_file.py``.
 import os
 import glob
 import argparse
-from collections import defaultdict
 
 import torch
 
@@ -32,6 +40,8 @@ from emit_processing import (
     infer_scene_maps,
     write_scene_cogs,
     save_products_to_nc,
+    scene_stem,
+    scene_cog_paths,
     parse_acquisition_date,
 )
 
@@ -41,8 +51,8 @@ DEFAULT_OUTPUT = os.path.join(DEFAULT_ROOT, "output")
 DEFAULT_L2 = os.path.join(DEFAULT_ROOT, "L2")
 
 parser = argparse.ArgumentParser(
-    description="Process EMIT L1B radiance scenes in a folder into daily "
-    "water-quality COGs (best pass per day)."
+    description="Process every EMIT L1B radiance scene in a folder into "
+    "per-scene water-quality COGs."
 )
 parser.add_argument(
     "folder",
@@ -81,34 +91,71 @@ parser.add_argument(
     action="store_true",
     help="Do not download ACOLITE if it is missing (error instead).",
 )
+parser.add_argument(
+    "--overwrite",
+    action="store_true",
+    help="Reprocess scenes whose COGs already exist (default: skip them).",
+)
+parser.add_argument(
+    "--write-nc",
+    action="store_true",
+    help="Also write a merged per-scene NetCDF to <output>/nc (default: off).",
+)
+parser.add_argument(
+    "--json-dir",
+    default=None,
+    help="If set, write the per-date GeoJSON catalogs here after processing.",
+)
+parser.add_argument(
+    "--limit",
+    type=int,
+    default=None,
+    help="Process at most this many scenes (useful for a quick test run).",
+)
 args = parser.parse_args()
 
 if not os.path.isdir(args.folder):
     raise NotADirectoryError(f"Input folder not found: {args.folder}")
 
-# Group input scenes by acquisition date.
-by_date = defaultdict(list)
-for path in sorted(glob.glob(os.path.join(args.folder, args.pattern))):
-    by_date[parse_acquisition_date(path)].append(path)
+scenes = sorted(glob.glob(os.path.join(args.folder, args.pattern)))
 
-if not by_date:
+if not scenes:
     raise FileNotFoundError(
         f"No files matching '{args.pattern}' found in {args.folder}"
     )
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
-n_scenes = sum(len(v) for v in by_date.values())
-print(f"Found {n_scenes} scene(s) across {len(by_date)} date(s) in {args.folder}")
+# Skip scenes that already have a complete set of COGs.
+if not args.overwrite:
+    pending = [
+        path
+        for path in scenes
+        if not all(
+            os.path.isfile(p)
+            for p in scene_cog_paths(args.output, scene_stem(path)).values()
+        )
+    ]
+    n_skipped = len(scenes) - len(pending)
+    if n_skipped:
+        print(f"Skipping {n_skipped} scene(s) that already have COGs.")
+    scenes = pending
 
-models = load_models(args.model_dir, device)
+if args.limit is not None:
+    scenes = scenes[: args.limit]
 
-succeeded, failed = [], []
-for date in sorted(by_date):
-    passes = by_date[date]
-    print(f"\n[{date}] {len(passes)} pass(es)")
-    best_maps, best_pass = None, None
-    for input_nc in passes:
+if not scenes:
+    print("Nothing to process.")
+else:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    dates = {parse_acquisition_date(p) for p in scenes}
+    print(f"Processing {len(scenes)} scene(s) across {len(dates)} date(s)")
+
+    models = load_models(args.model_dir, device)
+
+    succeeded, failed = [], []
+    for i, input_nc in enumerate(scenes, start=1):
+        name = os.path.basename(input_nc)
+        print(f"\n[{i}/{len(scenes)}] {name}")
         try:
             result = run_acolite(
                 input_nc,
@@ -117,23 +164,22 @@ for date in sorted(by_date):
                 download=not args.no_download,
             )
             maps = infer_scene_maps(result["l2w_files"][0], models)
-        except Exception as exc:  # noqa: BLE001 - keep batch going on failure
-            print(f"  FAILED {os.path.basename(input_nc)}: {exc}")
+            print(f"  {maps['valid']} valid pixels")
+            stem = scene_stem(input_nc)
+            write_scene_cogs(maps, args.output, stem)
+            if args.write_nc:
+                save_products_to_nc(maps, os.path.join(args.output, "nc", f"{stem}.nc"))
+        except Exception as exc:  # noqa: BLE001 - keep the batch going
+            print(f"  FAILED: {exc}")
             failed.append((input_nc, exc))
             continue
-        print(f"  {os.path.basename(input_nc)}: {maps['valid']} valid pixels")
-        if best_maps is None or maps["valid"] > best_maps["valid"]:
-            best_maps, best_pass = maps, input_nc
+        succeeded.append(input_nc)
 
-    if best_maps is None:
-        continue
-    print(f"  -> best: {os.path.basename(best_pass)} ({best_maps['valid']} px)")
-    write_scene_cogs(best_maps, args.output, date)
-    save_products_to_nc(
-        best_maps, os.path.join(args.output, f"EMIT-{date}-products.nc")
-    )
-    succeeded.append(date)
+    print(f"\nDone. {len(succeeded)} scene(s) written, {len(failed)} failed.")
+    for input_nc, exc in failed:
+        print(f"  - {os.path.basename(input_nc)}: {exc}")
 
-print(f"\nDone. {len(succeeded)} date(s) written, {len(failed)} pass(es) failed.")
-for input_nc, exc in failed:
-    print(f"  - {os.path.basename(input_nc)}: {exc}")
+if args.json_dir:
+    from make_json import build_catalogs
+
+    build_catalogs(args.output, args.json_dir)

@@ -63,10 +63,26 @@ pip install -r requirements.txt
 ### ACOLITE
 
 The atmospheric-correction step uses **ACOLITE** (which ships its own bundled
-Python and is *not* pip-installable). HyperCoast handles it for you:
-`hypercoast.download_acolite` fetches a complete official release on first use
-and `hypercoast.run_acolite` runs it, so **no manual install is required** —
-the run scripts download ACOLITE automatically the first time.
+Python and is *not* pip-installable). No manual install is required — the run
+scripts download the pinned release automatically the first time.
+
+#### The release is pinned, and the version matters
+
+`ACOLITE_VERSION` is pinned to **20251013.0**. This is not just tooling
+hygiene: ACOLITE's water/cirrus/TOA masks changed between releases, so the
+version changes how many pixels survive masking, and therefore the products.
+On the reference scene:
+
+| ACOLITE release | Valid retrieval pixels |
+|-----------------|------------------------|
+| 20231023.0      | 187,337                |
+| **20251013.0**  | **376,673**            |
+
+A factor of two. 20251013.0 is the release the reference products were
+generated with, confirmed by matching the executable's md5.
+
+Note that `hypercoast.download_acolite` is hardcoded to `20231023.0`, so it is
+deliberately **not** used here — calling it would silently halve the retrieval.
 
 To reuse an existing install (or control where it lives), set `ACOLITE_DIR`:
 

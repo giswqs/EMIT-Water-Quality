@@ -152,10 +152,25 @@ HF_DATA_URL = (
 # ===========================================================================
 # ACOLITE configuration. Atmospheric correction is run through HyperCoast's
 # ``run_acolite`` (which locates the bundled ``dist/acolite/acolite``
-# executable) and HyperCoast's ``download_acolite`` (which fetches a complete
-# official release). Point ACOLITE_DIR at an existing install to skip the
-# download; otherwise it is downloaded on first use.
+# executable). Point ACOLITE_DIR at an existing install to skip the download;
+# otherwise the pinned release is downloaded on first use.
+#
+# The ACOLITE release is pinned because it changes the *products*, not just
+# the tooling: the water/cirrus/TOA masks differ between versions, so the
+# number of retrieved pixels does too. On the reference scene, release
+# 20231023.0 yields 187,337 valid pixels where 20251013.0 yields 376,673 -
+# a factor of two. 20251013.0 is the release the reference products were
+# generated with (verified by matching the executable's md5).
+#
+# Note that ``hypercoast.download_acolite`` is hardcoded to 20231023.0, which
+# is why it is not used here.
 # ===========================================================================
+ACOLITE_VERSION = "20251013.0"
+ACOLITE_URL = (
+    f"https://github.com/acolite/acolite/releases/download/{ACOLITE_VERSION}/"
+    f"acolite_py_linux_{ACOLITE_VERSION}.tar.gz"
+)
+
 # `or` (not a get default) so an empty ACOLITE_DIR env var still falls back.
 ACOLITE_DIR = os.environ.get("ACOLITE_DIR") or os.path.join(
     BASE_DIR, "acolite_py_linux"
@@ -206,8 +221,8 @@ def ensure_acolite(acolite_dir=None, download=True):
     Args:
         acolite_dir (str, optional): Candidate ACOLITE install directory.
             Defaults to ``ACOLITE_DIR``.
-        download (bool): If the install is missing, fetch a complete official
-            release with ``hypercoast.download_acolite`` (default True).
+        download (bool): If the install is missing, fetch the pinned official
+            release (``ACOLITE_VERSION``) from GitHub (default True).
 
     Returns:
         str: A directory whose ``dist/acolite/acolite`` executable exists.
@@ -223,10 +238,33 @@ def ensure_acolite(acolite_dir=None, download=True):
             f"ACOLITE executable not found under {acolite_dir}. Set ACOLITE_DIR "
             "to an existing install, or allow download=True."
         )
-    # download_acolite extracts to <outdir>/acolite_py_<os> and returns it.
+
+    import tarfile
+    import urllib.request
+
+    # The archive extracts to <outdir>/acolite_py_linux. Fetch the pinned
+    # release directly rather than via hypercoast.download_acolite, which is
+    # hardcoded to 20231023.0 and would halve the retrieved pixel count.
     outdir = os.path.dirname(os.path.abspath(acolite_dir)) or "."
-    print("ACOLITE not found; downloading a release ...")
-    return hypercoast.download_acolite(outdir=outdir)
+    os.makedirs(outdir, exist_ok=True)
+    tarball = os.path.join(outdir, f"acolite_py_linux_{ACOLITE_VERSION}.tar.gz")
+    if not os.path.exists(tarball):
+        print(f"ACOLITE not found; downloading {ACOLITE_VERSION} ...")
+        # Download to a temporary name first so an interrupted transfer does
+        # not leave a truncated archive that later runs would trust.
+        urllib.request.urlretrieve(ACOLITE_URL, tarball + ".part")
+        os.replace(tarball + ".part", tarball)
+    print(f"Extracting {tarball} ...")
+    with tarfile.open(tarball) as tar:
+        tar.extractall(outdir)
+
+    extracted = os.path.join(outdir, "acolite_py_linux")
+    if not os.path.exists(_acolite_binary(extracted)):
+        raise FileNotFoundError(
+            f"ACOLITE executable still missing under {extracted} after "
+            f"extracting {tarball}."
+        )
+    return extracted
 
 
 # Conda/GDAL environment variables that would otherwise leak into the ACOLITE

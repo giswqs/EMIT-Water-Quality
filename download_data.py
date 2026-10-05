@@ -19,8 +19,8 @@ A NASA Earthdata login is required. Credentials are read from ``~/.netrc``
 variables). Create a free account at https://urs.earthdata.nasa.gov if needed.
 """
 
-import os
 import argparse
+import os
 
 import earthaccess
 import hypercoast

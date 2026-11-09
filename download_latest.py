@@ -15,7 +15,7 @@ variables). Create a free account at https://urs.earthdata.nasa.gov if needed.
 
 import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import earthaccess
 import hypercoast
@@ -55,7 +55,7 @@ def acquisition_time(granule):
 earthaccess.login(persist=True)
 
 # === Search recent windows until granules are found ===
-end = datetime.now(timezone.utc)
+end = datetime.now(UTC)
 granules = []
 for days in LOOKBACK_DAYS:
     start = end - timedelta(days=days)

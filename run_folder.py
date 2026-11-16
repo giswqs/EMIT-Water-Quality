@@ -18,21 +18,21 @@ them.
 To process a single file, use ``run_file.py``.
 """
 
-import os
-import glob
 import argparse
+import glob
+import os
 from collections import defaultdict
 
 import torch
 
 from emit_processing import (
     BASE_DIR,
-    load_models,
-    run_acolite,
     infer_scene_maps,
-    write_scene_cogs,
-    save_products_to_nc,
+    load_models,
     parse_acquisition_date,
+    run_acolite,
+    save_products_to_nc,
+    write_scene_cogs,
 )
 
 DEFAULT_ROOT = "/media/hdd/Data/EMIT"

@@ -32,6 +32,7 @@ jobs:
       # Where EMIT scenes, intermediate L2, and products live on the runner.
       EMIT_DATA_DIR: /media/hdd/Data/EMIT/data
       EMIT_OUTPUT_DIR: /media/hdd/Data/EMIT/output
+      EMIT_JSON_DIR: /media/hdd/Data/EMIT/json
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -48,10 +49,12 @@ jobs:
         run: python download_latest.py
 
       - name: Process the latest scene
-        run: python run_folder.py
+        run: python run_folder.py --json-dir "$EMIT_JSON_DIR"
 
       - name: List products
-        run: ls -lh "$EMIT_OUTPUT_DIR"
+        run: |
+          find "$EMIT_OUTPUT_DIR" -name '*.tif' | sort
+          ls -lh "$EMIT_JSON_DIR"
 
       - name: Publish GeoTIFFs to the EMIT-Data release
         env:
@@ -61,9 +64,10 @@ jobs:
             gh release create EMIT-Data \
               --title "EMIT-Data" \
               --notes "Cloud Optimized GeoTIFFs (chl-a, TSS, aCDOM) generated automatically from EMIT L1B radiance scenes (ACOLITE + MoE-VAE). Updated daily; products from each acquisition date accumulate here."
-          gh release upload EMIT-Data "$EMIT_OUTPUT_DIR"/*.tif --clobber
+          # COGs live in per-product subfolders (<product>/<granule>.tif).
+          gh release upload EMIT-Data "$EMIT_OUTPUT_DIR"/*/*.tif --clobber
 
-      - name: Publish GeoTIFFs to the Hugging Face dataset
+      - name: Publish COGs and JSON catalogs to the Hugging Face dataset
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -74,13 +78,22 @@ jobs:
           repo_id = "giswqs/EMIT-Water-Quality"
           api = HfApi(token=os.environ["HF_TOKEN"])
           api.create_repo(repo_id, repo_type="dataset", exist_ok=True)
+          # COGs go to data/<product>/<granule>.tif, catalogs to json/.
           api.upload_folder(
               folder_path=os.environ["EMIT_OUTPUT_DIR"],
-              path_in_repo="cogs",
+              path_in_repo="data",
               repo_id=repo_id,
               repo_type="dataset",
               allow_patterns=["*.tif"],
               commit_message="Add daily EMIT water-quality products",
           )
-          print("Uploaded GeoTIFFs to", f"https://huggingface.co/datasets/{repo_id}")
+          api.upload_folder(
+              folder_path=os.environ["EMIT_JSON_DIR"],
+              path_in_repo="json",
+              repo_id=repo_id,
+              repo_type="dataset",
+              allow_patterns=["*.json"],
+              commit_message="Update per-date EMIT catalogs",
+          )
+          print("Uploaded to", f"https://huggingface.co/datasets/{repo_id}")
           PY

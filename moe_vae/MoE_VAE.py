@@ -83,6 +83,14 @@ class VAE(LightningModule):
         return mu, log_var
 
     def reparameterize(self, mu, log_var):
+        # At inference use the latent mean instead of drawing a sample. The
+        # reparameterisation trick is only needed to backpropagate through the
+        # sampling during training; sampling at inference makes every run
+        # return different predictions for the same pixel (observed spread of
+        # ~250 mg m-3 chl-a between runs of the same scene). MoE_VAE dispatches
+        # to these VAE experts, so this is what makes a product reproducible.
+        if not self.training:
+            return mu
         std = torch.exp(0.5 * log_var)
         eps = torch.randn_like(std)
         z = mu + eps * std

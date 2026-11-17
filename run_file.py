@@ -2,7 +2,12 @@
 
 Runs ACOLITE atmospheric correction (L1B -> L2W) followed by MoE-VAE
 inference on one EMIT scene and writes validated Cloud Optimized GeoTIFFs
-(chl-a, TSS, aCDOM) plus a merged products NetCDF.
+(chl-a, TSS, aCDOM). Each COG keeps the granule name of the input and goes in
+a per-product subfolder::
+
+    output/chla/EMIT_L1B_RAD_001_20250414T200042_2510413_035.tif
+    output/tss/EMIT_L1B_RAD_001_20250414T200042_2510413_035.tif
+    output/acdom/EMIT_L1B_RAD_001_20250414T200042_2510413_035.tif
 
 Examples::
 
@@ -65,6 +70,11 @@ parser.add_argument(
     action="store_true",
     help="Do not download ACOLITE if it is missing (error instead).",
 )
+parser.add_argument(
+    "--write-nc",
+    action="store_true",
+    help="Also write a merged per-scene NetCDF to <output>/nc (default: off).",
+)
 args = parser.parse_args()
 
 # Resolve the input path: use it as given if it exists, otherwise look in the
@@ -87,5 +97,6 @@ process_scene(
     l2_dir=args.l2_dir,
     acolite_dir=args.acolite_dir,
     download=not args.no_download,
+    write_nc=args.write_nc,
 )
 print("Done.")

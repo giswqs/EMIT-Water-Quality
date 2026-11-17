@@ -2,6 +2,7 @@
 data/
 output/
 L2/
+json/
 
 # ACOLITE install (large external dependency) if placed inside the repo
 acolite_py_linux*/

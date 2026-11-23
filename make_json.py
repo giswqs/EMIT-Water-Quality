@@ -22,16 +22,16 @@ Examples::
     python make_json.py --base-url https://example.com/data
 """
 
-import os
-import re
+import argparse
 import glob
 import json
-import argparse
+import os
+import re
 from collections import defaultdict
 
 import rasterio
 
-from emit_processing import BASE_DIR, PRODUCT_LABELS, HF_DATA_URL
+from emit_processing import BASE_DIR, HF_DATA_URL, PRODUCT_LABELS
 
 
 def cog_bbox(tif_path):

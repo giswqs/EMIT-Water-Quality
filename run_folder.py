@@ -27,22 +27,22 @@ processed; the matching ``L1B_OBS`` granules must sit alongside them.
 To process a single file, use ``run_file.py``.
 """
 
-import os
-import glob
 import argparse
+import glob
+import os
 
 import torch
 
 from emit_processing import (
     BASE_DIR,
-    load_models,
-    run_acolite,
     infer_scene_maps,
-    write_scene_cogs,
-    save_products_to_nc,
-    scene_stem,
-    scene_cog_paths,
+    load_models,
     parse_acquisition_date,
+    run_acolite,
+    save_products_to_nc,
+    scene_cog_paths,
+    scene_stem,
+    write_scene_cogs,
 )
 
 DEFAULT_ROOT = "/media/hdd/Data/EMIT"

@@ -25,11 +25,11 @@ A NASA Earthdata login is required. Credentials are read from ``~/.netrc``
 variables). Create a free account at https://urs.earthdata.nasa.gov if needed.
 """
 
+import argparse
 import os
 import re
-import argparse
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import earthaccess
 import hypercoast
@@ -129,7 +129,7 @@ os.makedirs(args.out_dir, exist_ok=True)
 earthaccess.login(persist=True)
 
 # === Search widening windows until enough dates are found ===
-end = datetime.now(timezone.utc)
+end = datetime.now(UTC)
 selected = []
 for days in LOOKBACK_DAYS:
     start = end - timedelta(days=days)
